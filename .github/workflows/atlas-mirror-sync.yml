@@ -1,0 +1,75 @@
+# Atlas · 上游分支自动同步(静态站点镜像)
+#
+# 把本仓库的镜像分支重置到上游最新提交,删除需要屏蔽的本地路径(例如上游的
+# CNAME,否则 Pages 会跳到未验证的自定义域名),保留本工作流自身,再强推回去。
+# GitHub Pages 随后自动重建。
+name: Atlas · sync mirror
+
+on:
+  schedule:
+    - cron: "17 4 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: atlas-mirror-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    env:
+      TARGET_BRANCH: gh-pages
+      UPSTREAM: tsl0922/ttyd
+      UPSTREAM_BRANCH: gh-pages
+      STRIP_PATHS: CNAME
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: gh-pages
+          fetch-depth: 1
+      - name: Stash files to keep
+        run: |
+          rm -rf "$RUNNER_TEMP/keep"
+          mkdir -p "$RUNNER_TEMP/keep"
+          for p in .github/workflows/atlas-mirror-sync.yml; do
+            [ -e "$p" ] || continue
+            mkdir -p "$RUNNER_TEMP/keep/$(dirname "$p")"
+            cp -a "$p" "$RUNNER_TEMP/keep/$p"
+            echo "keep: $p"
+          done
+      - name: Fetch upstream branch
+        run: |
+          git remote add upstream "https://github.com/$UPSTREAM.git"
+          git fetch --no-tags --depth 1 upstream "$UPSTREAM_BRANCH"
+      - name: Rebuild mirror
+        id: mirror
+        run: |
+          before="$(git rev-parse HEAD)"
+          git checkout -B atlas-mirror FETCH_HEAD
+          for p in $STRIP_PATHS; do
+            if [ -e "$p" ]; then
+              [ -d "$p" ] && rm -rf "$p" || rm -f "$p"
+              echo "stripped: $p"
+            fi
+          done
+          cp -a "$RUNNER_TEMP/keep/." .
+          touch .nojekyll
+          git add -A
+          if git diff --cached --quiet; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            git -c user.name="Atlas Sync" -c user.email="atlas-sync@users.noreply.github.com" \
+              commit -m "chore(sync): mirror ${UPSTREAM}@${UPSTREAM_BRANCH}"
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+          echo "before=$before" >> "$GITHUB_OUTPUT"
+          echo "after=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+      - name: Push
+        if: steps.mirror.outputs.changed == 'true' || github.event_name == 'workflow_dispatch'
+        run: |
+          git fetch --no-tags origin "$TARGET_BRANCH" || true
+          git push --force-with-lease="refs/heads/$TARGET_BRANCH:refs/remotes/origin/$TARGET_BRANCH" \
+            origin "atlas-mirror:refs/heads/$TARGET_BRANCH"
